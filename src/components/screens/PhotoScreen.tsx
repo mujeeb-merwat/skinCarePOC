@@ -1,21 +1,49 @@
 import { Camera, ImageUp } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useFlow } from '../../context/FlowContext'
+import {
+  detectFacesInImage,
+  detectFacesInVideo,
+  initFaceDetection,
+} from '../../lib/faceDetection'
+import {
+  getPreviewDisplaySize,
+  loadImageFromDataUrl,
+  validateDetections,
+  type FaceValidationResult,
+} from '../../lib/faceGuide'
+import { FaceGuideOverlay } from '../FaceGuideOverlay'
 import { Button } from '../ui/Button'
 
 type Mode = 'choose' | 'camera' | 'preview'
 
+const INITIAL_VALIDATION: FaceValidationResult = {
+  status: 'no_face',
+  message: "We can't see your face clearly",
+}
+
 export function PhotoScreen() {
   const { photo, setPhoto, nextStep } = useFlow()
   const videoRef = useRef<HTMLVideoElement>(null)
+  const previewContainerRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
+  const rafRef = useRef<number | null>(null)
+  const lastDetectRef = useRef(0)
 
   const [mode, setMode] = useState<Mode>(photo ? 'preview' : 'choose')
   const [cameraError, setCameraError] = useState<string | null>(null)
+  const [faceValidation, setFaceValidation] =
+    useState<FaceValidationResult>(INITIAL_VALIDATION)
+  const [detectorReady, setDetectorReady] = useState(false)
+  const [isValidating, setIsValidating] = useState(false)
 
   const stopCamera = useCallback(() => {
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current)
+      rafRef.current = null
+    }
     streamRef.current?.getTracks().forEach((t) => t.stop())
     streamRef.current = null
     if (videoRef.current) {
@@ -23,15 +51,106 @@ export function PhotoScreen() {
     }
   }, [])
 
+  const validateImageDataUrl = useCallback(async (dataUrl: string) => {
+    await initFaceDetection()
+    const img = await loadImageFromDataUrl(dataUrl)
+    const { displayW, displayH } = getPreviewDisplaySize()
+    const detections = detectFacesInImage(img)
+    return validateDetections(
+      detections,
+      img.naturalWidth,
+      img.naturalHeight,
+      displayW,
+      displayH,
+    )
+  }, [])
+
+  useEffect(() => {
+    initFaceDetection()
+      .then(() => setDetectorReady(true))
+      .catch(() => {
+        setCameraError(
+          'Face detection could not load. Refresh the page and try again.',
+        )
+      })
+  }, [])
+
   useEffect(() => {
     return () => stopCamera()
   }, [stopCamera])
 
+  useEffect(() => {
+    if (mode !== 'camera' || !detectorReady) return
+
+    const tick = (timestamp: number) => {
+      const video = videoRef.current
+      const container = previewContainerRef.current
+      if (!video || !container || video.videoWidth === 0) {
+        rafRef.current = requestAnimationFrame(tick)
+        return
+      }
+
+      if (timestamp - lastDetectRef.current >= 100) {
+        lastDetectRef.current = timestamp
+        const detections = detectFacesInVideo(video, performance.now())
+        const result = validateDetections(
+          detections,
+          video.videoWidth,
+          video.videoHeight,
+          container.clientWidth,
+          container.clientHeight,
+        )
+        setFaceValidation(result)
+      }
+
+      rafRef.current = requestAnimationFrame(tick)
+    }
+
+    rafRef.current = requestAnimationFrame(tick)
+    return () => {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current)
+        rafRef.current = null
+      }
+    }
+  }, [mode, detectorReady])
+
+  useEffect(() => {
+    if (mode !== 'preview' || !photo || !detectorReady) return
+
+    let cancelled = false
+    setIsValidating(true)
+
+    validateImageDataUrl(photo)
+      .then((result) => {
+        if (!cancelled) setFaceValidation(result)
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setFaceValidation({
+            status: 'no_face',
+            message: "We can't see your face clearly",
+          })
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsValidating(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [mode, photo, detectorReady, validateImageDataUrl])
+
   const startCamera = async () => {
     stopCamera()
     setCameraError(null)
+    setFaceValidation(INITIAL_VALIDATION)
     setMode('camera')
+
     try {
+      await initFaceDetection()
+      setDetectorReady(true)
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: 'user' },
         audio: false,
@@ -50,6 +169,8 @@ export function PhotoScreen() {
   }
 
   const captureFrame = () => {
+    if (faceValidation.status !== 'valid') return
+
     const video = videoRef.current
     const canvas = canvasRef.current
     if (!video || !canvas) return
@@ -67,27 +188,54 @@ export function PhotoScreen() {
     setMode('preview')
   }
 
-  const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const onFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
+    e.target.value = ''
     if (!file || !file.type.startsWith('image/')) return
+
+    setIsValidating(true)
+    setCameraError(null)
+
     const reader = new FileReader()
-    reader.onload = () => {
-      stopCamera()
-      setPhoto(reader.result as string)
-      setMode('preview')
+    reader.onload = async () => {
+      try {
+        const dataUrl = reader.result as string
+        const result = await validateImageDataUrl(dataUrl)
+
+        if (result.status !== 'valid') {
+          setFaceValidation(result)
+          setCameraError(result.message)
+          setIsValidating(false)
+          return
+        }
+
+        stopCamera()
+        setPhoto(dataUrl)
+        setFaceValidation(result)
+        setMode('preview')
+      } catch {
+        setCameraError('Upload failed. Pick a different image and try again.')
+      } finally {
+        setIsValidating(false)
+      }
     }
     reader.onerror = () => {
       setCameraError('Upload failed. Pick a different image and try again.')
+      setIsValidating(false)
     }
     reader.readAsDataURL(file)
-    e.target.value = ''
   }
 
   const handleRetake = () => {
     setPhoto(null)
     setMode('choose')
     setCameraError(null)
+    setFaceValidation(INITIAL_VALIDATION)
   }
+
+  const canCapture = faceValidation.status === 'valid' && detectorReady
+  const canContinue =
+    faceValidation.status === 'valid' && detectorReady && !isValidating
 
   if (mode === 'preview' && photo) {
     return (
@@ -100,7 +248,8 @@ export function PhotoScreen() {
           skin accurately.
         </p>
         <div
-          className="mt-6 overflow-hidden rounded-frame border-2 shadow-berry-glow"
+          ref={previewContainerRef}
+          className="relative mt-6 overflow-hidden rounded-frame border-2 shadow-berry-glow"
           style={{ borderColor: 'var(--berry)' }}
         >
           <img
@@ -108,12 +257,23 @@ export function PhotoScreen() {
             alt="Your uploaded face photo for skin analysis"
             className="aspect-[3/4] w-full max-w-[280px] object-cover"
           />
+          <FaceGuideOverlay valid={faceValidation.status === 'valid'} />
         </div>
-        <p className="mt-3 text-center text-[13px] text-ink-muted">
+        <p
+          className={`mt-3 text-center text-[13px] ${
+            faceValidation.status === 'valid' ? 'text-ink-muted' : 'text-berry'
+          }`}
+          role={faceValidation.status === 'valid' ? undefined : 'alert'}
+        >
+          {isValidating ? 'Checking your photo...' : faceValidation.message}
+        </p>
+        <p className="mt-2 text-center text-[13px] text-ink-muted">
           Your photo stays private and isn&apos;t used to train anything.
         </p>
         <div className="mt-6 flex w-full max-w-xs flex-col gap-3">
-          <Button onClick={nextStep}>Continue</Button>
+          <Button onClick={nextStep} disabled={!canContinue}>
+            Continue
+          </Button>
           <Button variant="secondary" onClick={handleRetake}>
             Retake
           </Button>
@@ -128,7 +288,10 @@ export function PhotoScreen() {
         <h1 className="font-display text-[28px] font-bold leading-[1.15] text-ink md:text-[32px]">
           Time for your close-up
         </h1>
-        <div className="relative mt-6 w-full max-w-[280px] overflow-hidden rounded-frame">
+        <div
+          ref={previewContainerRef}
+          className="relative mt-6 w-full max-w-[280px] overflow-hidden rounded-frame"
+        >
           <video
             ref={videoRef}
             autoPlay
@@ -136,27 +299,29 @@ export function PhotoScreen() {
             muted
             className="aspect-[3/4] w-full object-cover"
           />
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-            <div
-              className="h-[70%] w-[55%] rounded-[50%] border-2 border-white/70"
-              style={{
-                boxShadow: '0 0 0 9999px rgba(0,0,0,0.25)',
-                backdropFilter: 'blur(0px)',
-              }}
-            />
-          </div>
+          <FaceGuideOverlay valid={faceValidation.status === 'valid'} />
         </div>
-        <p className="mt-3 text-[13px] text-ink-muted">
-          Center your face in the oval
+        <p
+          className={`mt-3 text-[13px] ${
+            faceValidation.status === 'valid' ? 'text-ink-muted' : 'text-berry'
+          }`}
+          role={faceValidation.status === 'valid' ? undefined : 'alert'}
+        >
+          {!detectorReady
+            ? 'Loading face detection...'
+            : faceValidation.message}
         </p>
         <canvas ref={canvasRef} className="hidden" />
         <div className="mt-6 flex w-full max-w-xs flex-col gap-3">
-          <Button onClick={captureFrame}>Take a photo</Button>
+          <Button onClick={captureFrame} disabled={!canCapture}>
+            Take a photo
+          </Button>
           <Button
             variant="secondary"
             onClick={() => {
               stopCamera()
               setMode('choose')
+              setFaceValidation(INITIAL_VALIDATION)
             }}
           >
             Cancel
@@ -182,11 +347,18 @@ export function PhotoScreen() {
         </p>
       )}
 
+      {isValidating && (
+        <p className="mt-4 text-center text-[13px] text-ink-muted">
+          Checking your photo...
+        </p>
+      )}
+
       <div className="mt-6 grid w-full grid-cols-1 gap-4 sm:grid-cols-2">
         <button
           type="button"
           onClick={startCamera}
-          className="focus-ring glass-panel flex flex-col items-center gap-3 rounded-panel p-6 transition-transform hover:scale-[1.01]"
+          disabled={isValidating}
+          className="focus-ring glass-panel flex flex-col items-center gap-3 rounded-panel p-6 transition-transform hover:scale-[1.01] disabled:opacity-60"
         >
           <Camera className="h-8 w-8 text-berry" aria-hidden="true" />
           <span className="text-base font-semibold text-ink">Take a photo</span>
@@ -194,7 +366,8 @@ export function PhotoScreen() {
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
-          className="focus-ring glass-panel flex flex-col items-center gap-3 rounded-panel p-6 transition-transform hover:scale-[1.01]"
+          disabled={isValidating}
+          className="focus-ring glass-panel flex flex-col items-center gap-3 rounded-panel p-6 transition-transform hover:scale-[1.01] disabled:opacity-60"
         >
           <ImageUp className="h-8 w-8 text-berry" aria-hidden="true" />
           <span className="text-base font-semibold text-ink">Upload a photo</span>
