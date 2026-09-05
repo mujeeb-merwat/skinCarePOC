@@ -15,26 +15,13 @@ export function QuizScreen() {
   } = useFlow()
 
   const question = QUIZ_QUESTIONS[quizIndex]
-  const isMulti = question.multiSelect === true
-  const maxSelect = question.maxSelect ?? 1
-
   const currentValue = answers[question.id]
-
   const isLastQuestion = quizIndex === QUIZ_QUESTIONS.length - 1
 
   const handleSelect = (option: string) => {
-    if (isMulti) {
-      const selected = answers.concerns
-      if (selected.includes(option)) {
-        setAnswer('concerns', selected.filter((o) => o !== option))
-      } else if (selected.length < maxSelect) {
-        setAnswer('concerns', [...selected, option])
-      }
-    } else {
-      setAnswer(question.id, option)
-      if (!isLastQuestion) {
-        setTimeout(() => setQuizIndex(quizIndex + 1), 200)
-      }
+    setAnswer(question.id, option)
+    if (!isLastQuestion) {
+      setTimeout(() => setQuizIndex(quizIndex + 1), 200)
     }
   }
 
@@ -54,14 +41,7 @@ export function QuizScreen() {
     }
   }
 
-  const isSelected = (option: string) => {
-    if (isMulti) return answers.concerns.includes(option)
-    return currentValue === option
-  }
-
-  const canContinue = isMulti
-    ? answers.concerns.length > 0
-    : currentValue !== null
+  const canContinue = currentValue !== null
 
   return (
     <div className="relative flex flex-col">
@@ -82,24 +62,18 @@ export function QuizScreen() {
         {question.question}
       </h1>
 
-      {isMulti && (
-        <p className="mt-2 text-[13px] text-ink-muted">
-          Pick up to {maxSelect}
-        </p>
-      )}
-
       <div className="mt-6 flex flex-col gap-2.5">
         {question.options.map((option) => (
           <Chip
             key={option}
             label={option}
-            selected={isSelected(option)}
+            selected={currentValue === option}
             onClick={() => handleSelect(option)}
           />
         ))}
       </div>
 
-      {(isMulti || isLastQuestion) && (
+      {isLastQuestion && (
         <Button
           className="mt-8 w-full"
           onClick={handleContinue}

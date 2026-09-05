@@ -22,19 +22,19 @@ export type AnalysisResult = {
 }
 
 export type QuizAnswers = {
+  mainConcern: string | null
   skinType: string | null
-  concerns: string[]
+  sunscreen: string | null
   routine: string | null
-  goal: string | null
 }
 
 export type FlowDirection = 'forward' | 'back'
 
 export const initialAnswers: QuizAnswers = {
+  mainConcern: null,
   skinType: null,
-  concerns: [],
+  sunscreen: null,
   routine: null,
-  goal: null,
 }
 
 export type QuizQuestion = {
@@ -47,43 +47,33 @@ export type QuizQuestion = {
 
 export const QUIZ_QUESTIONS: QuizQuestion[] = [
   {
-    id: 'skinType',
-    question: 'How would you describe your skin?',
-    options: ['Oily', 'Dry', 'Combination', 'Normal', 'Not sure'],
+    id: 'mainConcern',
+    question: "What's your main skin concern right now?",
+    options: [
+      'Acne & Breakouts',
+      'Fine Lines & Wrinkles',
+      'Dark Spots & Uneven Tone',
+      'Dullness & Texture',
+    ],
   },
   {
-    id: 'concerns',
-    question: "What's bothering you most right now?",
-    options: [
-      'Acne & breakouts',
-      'Dark spots or pigmentation',
-      'Fine lines & wrinkles',
-      'Redness & sensitivity',
-      'Dullness',
-      'Large pores',
-    ],
-    multiSelect: true,
-    maxSelect: 3,
+    id: 'skinType',
+    question: 'How would you describe your skin type?',
+    options: ['Oily', 'Dry', 'Combination', 'Sensitive'],
+  },
+  {
+    id: 'sunscreen',
+    question: 'How often do you wear sunscreen?',
+    options: ['Daily', 'Sometimes', 'Rarely', 'Never'],
   },
   {
     id: 'routine',
-    question: 'What does your routine look like today?',
+    question: 'How would you describe your current skincare routine?',
     options: [
-      'Nothing yet',
-      'Just a cleanser',
-      'Cleanser + moisturizer',
-      'Full routine with actives',
-    ],
-  },
-  {
-    id: 'goal',
-    question: "What's your main goal?",
-    options: [
-      'Calm & clear skin',
-      'Even tone',
-      'Smoother texture',
-      'Firmer skin',
-      'Healthy glow',
+      "None — I don't use any products",
+      'Basic — cleanser and moisturizer only',
+      'Moderate — includes serums or treatments',
+      'Extensive — full multi-step routine',
     ],
   },
 ]
