@@ -67,6 +67,69 @@ export function getObjectCoverTransform(
   }
 }
 
+export function getObjectCoverSourceRect(
+  sourceW: number,
+  sourceH: number,
+  displayW: number,
+  displayH: number,
+): Rect {
+  const sourceAspect = sourceW / sourceH
+  const displayAspect = displayW / displayH
+
+  if (sourceAspect > displayAspect) {
+    const w = sourceH * displayAspect
+    return {
+      x: (sourceW - w) / 2,
+      y: 0,
+      w,
+      h: sourceH,
+    }
+  }
+
+  const h = sourceW / displayAspect
+  return {
+    x: 0,
+    y: (sourceH - h) / 2,
+    w: sourceW,
+    h,
+  }
+}
+
+const DETECT_MAX_SIDE = 640
+
+export function drawCoveredVideoFrame(
+  video: HTMLVideoElement,
+  canvas: HTMLCanvasElement,
+  displayW: number,
+  displayH: number,
+): { width: number; height: number } | null {
+  if (!video.videoWidth || !video.videoHeight || !displayW || !displayH) {
+    return null
+  }
+
+  const crop = getObjectCoverSourceRect(
+    video.videoWidth,
+    video.videoHeight,
+    displayW,
+    displayH,
+  )
+
+  const scale = Math.min(1, DETECT_MAX_SIDE / Math.max(crop.w, crop.h))
+  const width = Math.max(1, Math.round(crop.w * scale))
+  const height = Math.max(1, Math.round(crop.h * scale))
+
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width
+    canvas.height = height
+  }
+
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return null
+
+  ctx.drawImage(video, crop.x, crop.y, crop.w, crop.h, 0, 0, width, height)
+  return { width, height }
+}
+
 export function mapBboxToDisplay(
   bbox: BoundingBox,
   transform: ReturnType<typeof getObjectCoverTransform>,

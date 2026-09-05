@@ -3,11 +3,13 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useFlow } from '../../context/FlowContext'
 import {
   detectFacesInImage,
-  detectFacesInVideo,
+  detectFacesInVideoFrame,
   initFaceDetection,
+  resetVideoDetectionSession,
 } from '../../lib/faceDetection'
 import {
   createValidationStabilizer,
+  drawCoveredVideoFrame,
   getPreviewDisplaySize,
   loadImageFromDataUrl,
   validateDetections,
@@ -64,6 +66,8 @@ export function PhotoScreen() {
   const streamRef = useRef<MediaStream | null>(null)
   const rafRef = useRef<number | null>(null)
   const lastDetectRef = useRef(0)
+  const detectCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const detectingRef = useRef(false)
   const containerSizeRef = useRef({ width: 0, height: 0 })
   const validationStatusRef = useRef<FaceValidationStatus>(INITIAL_VALIDATION.status)
   const stabilizerRef = useRef(createValidationStabilizer())
@@ -151,31 +155,50 @@ export function PhotoScreen() {
   useEffect(() => {
     if (mode !== 'camera' || !detectorReady) return
 
+    if (!detectCanvasRef.current) {
+      detectCanvasRef.current = document.createElement('canvas')
+    }
+
+    let cancelled = false
+    resetVideoDetectionSession()
     stabilizerRef.current.reset()
     validationStatusRef.current = INITIAL_VALIDATION.status
     setFaceValidation(INITIAL_VALIDATION)
 
     const tick = (timestamp: number) => {
       const video = videoRef.current
+      const canvas = detectCanvasRef.current
       const { width: displayW, height: displayH } = containerSizeRef.current
-      if (!video || displayW === 0 || displayH === 0 || video.videoWidth === 0) {
+      if (!video || !canvas || displayW === 0 || displayH === 0 || video.videoWidth === 0) {
         rafRef.current = requestAnimationFrame(tick)
         return
       }
 
-      if (timestamp - lastDetectRef.current >= 100) {
+      if (timestamp - lastDetectRef.current >= 100 && !detectingRef.current) {
         lastDetectRef.current = timestamp
-        const detections = detectFacesInVideo(video, performance.now())
-        const raw = validateDetections(
-          detections,
-          video.videoWidth,
-          video.videoHeight,
-          displayW,
-          displayH,
-          validationStatusRef.current,
-        )
-        const stabilized = stabilizerRef.current.update(raw)
-        updateFaceValidation(stabilized)
+        const drawn = drawCoveredVideoFrame(video, canvas, displayW, displayH)
+        if (drawn) {
+          detectingRef.current = true
+          void detectFacesInVideoFrame(canvas)
+            .then((detections) => {
+              if (cancelled) return
+              const raw = validateDetections(
+                detections,
+                drawn.width,
+                drawn.height,
+                displayW,
+                displayH,
+                validationStatusRef.current,
+              )
+              updateFaceValidation(stabilizerRef.current.update(raw))
+            })
+            .catch(() => {
+              // Keep the last stable status if a single frame fails.
+            })
+            .finally(() => {
+              detectingRef.current = false
+            })
+        }
       }
 
       rafRef.current = requestAnimationFrame(tick)
@@ -183,6 +206,8 @@ export function PhotoScreen() {
 
     rafRef.current = requestAnimationFrame(tick)
     return () => {
+      cancelled = true
+      detectingRef.current = false
       if (rafRef.current !== null) {
         cancelAnimationFrame(rafRef.current)
         rafRef.current = null
