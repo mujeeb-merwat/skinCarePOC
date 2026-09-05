@@ -7,7 +7,12 @@ export type Rect = {
   h: number
 }
 
-export type FaceValidationStatus = 'no_face' | 'out_of_frame' | 'valid'
+export type FaceValidationStatus =
+  | 'no_face'
+  | 'too_far'
+  | 'too_close'
+  | 'off_center'
+  | 'valid'
 
 export type FaceValidationResult = {
   status: FaceValidationStatus
@@ -15,10 +20,26 @@ export type FaceValidationResult = {
 }
 
 const MIN_SCORE = 0.5
-const MIN_FACE_IN_GUIDE = 0.7
-const MIN_FACE_TO_GUIDE_RATIO = 0.28
-const MAX_FACE_TO_GUIDE_RATIO = 0.95
 const GUIDE_INSET = 0.78
+const GUIDE_CENTER_PAD = 0.08
+
+// Enter/exit bands to prevent flip-flopping at thresholds
+const SIZE_ENTER = 0.16
+const SIZE_EXIT = 0.12
+const SIZE_MAX_ENTER = 0.95
+const SIZE_MAX_EXIT = 1.05
+const OVERLAP_ENTER = 0.65
+const OVERLAP_EXIT = 0.55
+
+const STABILIZER_FRAMES = 3
+
+const STATUS_MESSAGES: Record<FaceValidationStatus, string> = {
+  no_face: "We can't see your face clearly",
+  too_far: 'Move a little closer',
+  too_close: 'Move back a little',
+  off_center: 'Center your face in the frame',
+  valid: 'Looks good',
+}
 
 export function getObjectCoverTransform(
   sourceW: number,
@@ -77,48 +98,80 @@ function intersectionArea(a: Rect, b: Rect): number {
   return (x2 - x1) * (y2 - y1)
 }
 
-export function validateFaceInGuide(
-  faceRect: Rect | null,
-  guideRect: Rect,
-): FaceValidationResult {
-  if (!faceRect) {
-    return {
-      status: 'no_face',
-      message: "We can't see your face clearly",
-    }
+function getPaddedGuideRect(guideRect: Rect): Rect {
+  const padX = guideRect.w * GUIDE_CENTER_PAD
+  const padY = guideRect.h * GUIDE_CENTER_PAD
+  return {
+    x: guideRect.x + padX,
+    y: guideRect.y + padY,
+    w: guideRect.w - padX * 2,
+    h: guideRect.h - padY * 2,
   }
+}
 
+function isCenterInGuide(faceRect: Rect, guideRect: Rect): boolean {
+  const padded = getPaddedGuideRect(guideRect)
+  const faceCenterX = faceRect.x + faceRect.w / 2
+  const faceCenterY = faceRect.y + faceRect.h / 2
+  return (
+    faceCenterX >= padded.x &&
+    faceCenterX <= padded.x + padded.w &&
+    faceCenterY >= padded.y &&
+    faceCenterY <= padded.y + padded.h
+  )
+}
+
+function resultForStatus(status: FaceValidationStatus): FaceValidationResult {
+  return {
+    status,
+    message: STATUS_MESSAGES[status],
+  }
+}
+
+function classifyFaceMetrics(
+  faceRect: Rect,
+  guideRect: Rect,
+  previousStatus: FaceValidationStatus | null,
+): FaceValidationStatus {
   const faceArea = faceRect.w * faceRect.h
   const guideArea = guideRect.w * guideRect.h
   const overlap = intersectionArea(faceRect, guideRect)
   const overlapRatio = overlap / faceArea
-
-  const faceCenterX = faceRect.x + faceRect.w / 2
-  const faceCenterY = faceRect.y + faceRect.h / 2
-  const centerInGuide =
-    faceCenterX >= guideRect.x &&
-    faceCenterX <= guideRect.x + guideRect.w &&
-    faceCenterY >= guideRect.y &&
-    faceCenterY <= guideRect.y + guideRect.h
-
   const faceToGuideRatio = faceArea / guideArea
+  const centerInGuide = isCenterInGuide(faceRect, guideRect)
 
-  if (
-    !centerInGuide ||
-    overlapRatio < MIN_FACE_IN_GUIDE ||
-    faceToGuideRatio < MIN_FACE_TO_GUIDE_RATIO ||
-    faceToGuideRatio > MAX_FACE_TO_GUIDE_RATIO
-  ) {
-    return {
-      status: 'out_of_frame',
-      message: 'Put your face in the frame',
-    }
+  const wasValid = previousStatus === 'valid'
+
+  const minSize = wasValid ? SIZE_EXIT : SIZE_ENTER
+  const maxSize = wasValid ? SIZE_MAX_EXIT : SIZE_MAX_ENTER
+  const minOverlap = wasValid ? OVERLAP_EXIT : OVERLAP_ENTER
+
+  if (faceToGuideRatio < minSize) {
+    return 'too_far'
   }
 
-  return {
-    status: 'valid',
-    message: 'Looks good',
+  if (faceToGuideRatio > maxSize) {
+    return 'too_close'
   }
+
+  if (!centerInGuide || overlapRatio < minOverlap) {
+    return 'off_center'
+  }
+
+  return 'valid'
+}
+
+export function validateFaceInGuide(
+  faceRect: Rect | null,
+  guideRect: Rect,
+  previousStatus: FaceValidationStatus | null = null,
+): FaceValidationResult {
+  if (!faceRect) {
+    return resultForStatus('no_face')
+  }
+
+  const status = classifyFaceMetrics(faceRect, guideRect, previousStatus)
+  return resultForStatus(status)
 }
 
 type DetectionLike = {
@@ -132,6 +185,7 @@ export function validateDetections(
   sourceH: number,
   displayW: number,
   displayH: number,
+  previousStatus: FaceValidationStatus | null = null,
 ): FaceValidationResult {
   const transform = getObjectCoverTransform(sourceW, sourceH, displayW, displayH)
   const guide = getGuideRect(displayW, displayH)
@@ -141,7 +195,7 @@ export function validateDetections(
   )
 
   if (usable.length === 0) {
-    return validateFaceInGuide(null, guide)
+    return validateFaceInGuide(null, guide, previousStatus)
   }
 
   let best = usable[0]
@@ -156,7 +210,44 @@ export function validateDetections(
   }
 
   const faceRect = mapBboxToDisplay(best.boundingBox!, transform)
-  return validateFaceInGuide(faceRect, guide)
+  return validateFaceInGuide(faceRect, guide, previousStatus)
+}
+
+export function createValidationStabilizer(requiredFrames = STABILIZER_FRAMES) {
+  let stableStatus: FaceValidationStatus | null = null
+  let pendingStatus: FaceValidationStatus | null = null
+  let pendingCount = 0
+
+  return {
+    update(raw: FaceValidationResult): FaceValidationResult {
+      if (raw.status === stableStatus) {
+        pendingStatus = null
+        pendingCount = 0
+        return resultForStatus(stableStatus!)
+      }
+
+      if (raw.status === pendingStatus) {
+        pendingCount += 1
+      } else {
+        pendingStatus = raw.status
+        pendingCount = 1
+      }
+
+      if (stableStatus === null || pendingCount >= requiredFrames) {
+        stableStatus = raw.status
+        pendingStatus = null
+        pendingCount = 0
+        return resultForStatus(stableStatus)
+      }
+
+      return resultForStatus(stableStatus ?? raw.status)
+    },
+    reset() {
+      stableStatus = null
+      pendingStatus = null
+      pendingCount = 0
+    },
+  }
 }
 
 export const PREVIEW_DISPLAY_WIDTH = 280

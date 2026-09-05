@@ -183,3 +183,11 @@
     width: 60% !important;
   }
 }
+
+.camera-active .blob,
+.camera-active .blob-1,
+.camera-active .blob-2,
+.camera-active .blob-3,
+.camera-active .blob-4 {
+  animation: none;
+}

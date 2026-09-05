@@ -7,10 +7,12 @@ import {
   initFaceDetection,
 } from '../../lib/faceDetection'
 import {
+  createValidationStabilizer,
   getPreviewDisplaySize,
   loadImageFromDataUrl,
   validateDetections,
   type FaceValidationResult,
+  type FaceValidationStatus,
 } from '../../lib/faceGuide'
 import { FaceGuideOverlay } from '../FaceGuideOverlay'
 import { Button } from '../ui/Button'
@@ -22,6 +24,37 @@ const INITIAL_VALIDATION: FaceValidationResult = {
   message: "We can't see your face clearly",
 }
 
+const PORTRAIT_CAMERA_CONSTRAINTS: MediaStreamConstraints = {
+  video: {
+    facingMode: 'user',
+    width: { ideal: 960 },
+    height: { ideal: 1280 },
+    aspectRatio: { ideal: 3 / 4 },
+  },
+  audio: false,
+}
+
+const FALLBACK_CAMERA_CONSTRAINTS: MediaStreamConstraints = {
+  video: { facingMode: 'user' },
+  audio: false,
+}
+
+const PREVIEW_CONTAINER_STYLE = {
+  transform: 'translateZ(0)',
+  contain: 'paint',
+} as const
+
+async function requestCameraStream(): Promise<MediaStream> {
+  try {
+    return await navigator.mediaDevices.getUserMedia(PORTRAIT_CAMERA_CONSTRAINTS)
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'OverconstrainedError') {
+      return navigator.mediaDevices.getUserMedia(FALLBACK_CAMERA_CONSTRAINTS)
+    }
+    throw error
+  }
+}
+
 export function PhotoScreen() {
   const { photo, setPhoto, nextStep } = useFlow()
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -31,6 +64,9 @@ export function PhotoScreen() {
   const streamRef = useRef<MediaStream | null>(null)
   const rafRef = useRef<number | null>(null)
   const lastDetectRef = useRef(0)
+  const containerSizeRef = useRef({ width: 0, height: 0 })
+  const validationStatusRef = useRef<FaceValidationStatus>(INITIAL_VALIDATION.status)
+  const stabilizerRef = useRef(createValidationStabilizer())
 
   const [mode, setMode] = useState<Mode>(photo ? 'preview' : 'choose')
   const [cameraError, setCameraError] = useState<string | null>(null)
@@ -38,6 +74,12 @@ export function PhotoScreen() {
     useState<FaceValidationResult>(INITIAL_VALIDATION)
   const [detectorReady, setDetectorReady] = useState(false)
   const [isValidating, setIsValidating] = useState(false)
+
+  const updateFaceValidation = useCallback((result: FaceValidationResult) => {
+    if (result.status === validationStatusRef.current) return
+    validationStatusRef.current = result.status
+    setFaceValidation(result)
+  }, [])
 
   const stopCamera = useCallback(() => {
     if (rafRef.current !== null) {
@@ -49,13 +91,14 @@ export function PhotoScreen() {
     if (videoRef.current) {
       videoRef.current.srcObject = null
     }
+    document.documentElement.classList.remove('camera-active')
   }, [])
 
   const validateImageDataUrl = useCallback(async (dataUrl: string) => {
     await initFaceDetection()
     const img = await loadImageFromDataUrl(dataUrl)
     const { displayW, displayH } = getPreviewDisplaySize()
-    const detections = detectFacesInImage(img)
+    const detections = await detectFacesInImage(img)
     return validateDetections(
       detections,
       img.naturalWidth,
@@ -80,12 +123,42 @@ export function PhotoScreen() {
   }, [stopCamera])
 
   useEffect(() => {
+    const container = previewContainerRef.current
+    if (!container) return
+
+    const updateSize = () => {
+      containerSizeRef.current = {
+        width: container.clientWidth,
+        height: container.clientHeight,
+      }
+    }
+
+    updateSize()
+    const observer = new ResizeObserver(updateSize)
+    observer.observe(container)
+    return () => observer.disconnect()
+  }, [mode, photo])
+
+  useEffect(() => {
+    if (mode !== 'camera') return
+
+    document.documentElement.classList.add('camera-active')
+    return () => {
+      document.documentElement.classList.remove('camera-active')
+    }
+  }, [mode])
+
+  useEffect(() => {
     if (mode !== 'camera' || !detectorReady) return
+
+    stabilizerRef.current.reset()
+    validationStatusRef.current = INITIAL_VALIDATION.status
+    setFaceValidation(INITIAL_VALIDATION)
 
     const tick = (timestamp: number) => {
       const video = videoRef.current
-      const container = previewContainerRef.current
-      if (!video || !container || video.videoWidth === 0) {
+      const { width: displayW, height: displayH } = containerSizeRef.current
+      if (!video || displayW === 0 || displayH === 0 || video.videoWidth === 0) {
         rafRef.current = requestAnimationFrame(tick)
         return
       }
@@ -93,14 +166,16 @@ export function PhotoScreen() {
       if (timestamp - lastDetectRef.current >= 100) {
         lastDetectRef.current = timestamp
         const detections = detectFacesInVideo(video, performance.now())
-        const result = validateDetections(
+        const raw = validateDetections(
           detections,
           video.videoWidth,
           video.videoHeight,
-          container.clientWidth,
-          container.clientHeight,
+          displayW,
+          displayH,
+          validationStatusRef.current,
         )
-        setFaceValidation(result)
+        const stabilized = stabilizerRef.current.update(raw)
+        updateFaceValidation(stabilized)
       }
 
       rafRef.current = requestAnimationFrame(tick)
@@ -113,7 +188,7 @@ export function PhotoScreen() {
         rafRef.current = null
       }
     }
-  }, [mode, detectorReady])
+  }, [mode, detectorReady, updateFaceValidation])
 
   useEffect(() => {
     if (mode !== 'preview' || !photo || !detectorReady) return
@@ -123,10 +198,14 @@ export function PhotoScreen() {
 
     validateImageDataUrl(photo)
       .then((result) => {
-        if (!cancelled) setFaceValidation(result)
+        if (!cancelled) {
+          validationStatusRef.current = result.status
+          setFaceValidation(result)
+        }
       })
       .catch(() => {
         if (!cancelled) {
+          validationStatusRef.current = 'no_face'
           setFaceValidation({
             status: 'no_face',
             message: "We can't see your face clearly",
@@ -145,22 +224,21 @@ export function PhotoScreen() {
   const startCamera = async () => {
     stopCamera()
     setCameraError(null)
+    stabilizerRef.current.reset()
+    validationStatusRef.current = INITIAL_VALIDATION.status
     setFaceValidation(INITIAL_VALIDATION)
     setMode('camera')
 
     try {
       await initFaceDetection()
       setDetectorReady(true)
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user' },
-        audio: false,
-      })
+      const stream = await requestCameraStream()
       streamRef.current = stream
       if (videoRef.current) {
         videoRef.current.srcObject = stream
-        await videoRef.current.play()
       }
     } catch {
+      document.documentElement.classList.remove('camera-active')
       setCameraError(
         'Camera access is unavailable. Upload a photo instead.',
       )
@@ -203,6 +281,7 @@ export function PhotoScreen() {
         const result = await validateImageDataUrl(dataUrl)
 
         if (result.status !== 'valid') {
+          validationStatusRef.current = result.status
           setFaceValidation(result)
           setCameraError(result.message)
           setIsValidating(false)
@@ -211,6 +290,7 @@ export function PhotoScreen() {
 
         stopCamera()
         setPhoto(dataUrl)
+        validationStatusRef.current = result.status
         setFaceValidation(result)
         setMode('preview')
       } catch {
@@ -230,6 +310,8 @@ export function PhotoScreen() {
     setPhoto(null)
     setMode('choose')
     setCameraError(null)
+    stabilizerRef.current.reset()
+    validationStatusRef.current = INITIAL_VALIDATION.status
     setFaceValidation(INITIAL_VALIDATION)
   }
 
@@ -250,7 +332,7 @@ export function PhotoScreen() {
         <div
           ref={previewContainerRef}
           className="relative mt-6 overflow-hidden rounded-frame border-2 shadow-berry-glow"
-          style={{ borderColor: 'var(--berry)' }}
+          style={{ ...PREVIEW_CONTAINER_STYLE, borderColor: 'var(--berry)' }}
         >
           <img
             src={photo}
@@ -291,6 +373,7 @@ export function PhotoScreen() {
         <div
           ref={previewContainerRef}
           className="relative mt-6 w-full max-w-[280px] overflow-hidden rounded-frame"
+          style={PREVIEW_CONTAINER_STYLE}
         >
           <video
             ref={videoRef}
@@ -321,6 +404,8 @@ export function PhotoScreen() {
             onClick={() => {
               stopCamera()
               setMode('choose')
+              stabilizerRef.current.reset()
+              validationStatusRef.current = INITIAL_VALIDATION.status
               setFaceValidation(INITIAL_VALIDATION)
             }}
           >
