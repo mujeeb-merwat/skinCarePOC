@@ -21,25 +21,21 @@ export type FaceValidationResult = {
 
 const MIN_SCORE = 0.5
 const GUIDE_INSET = 0.78
-const GUIDE_CENTER_PAD = 0.12
+const GUIDE_CENTER_PAD = 0.08
 
-// Enter/exit bands to prevent flip-flopping at thresholds.
-// Size is face-area / guide-area. BlazeFace boxes are tight on the face,
-// so ~0.38 means the face fills most of the square without overflowing it.
-const SIZE_ENTER = 0.38
-const SIZE_EXIT = 0.30
-const SIZE_MAX_ENTER = 0.92
-const SIZE_MAX_EXIT = 1.02
-const OVERLAP_ENTER = 0.82
-const OVERLAP_EXIT = 0.72
-const GUIDE_FILL_ENTER = 0.32
-const GUIDE_FILL_EXIT = 0.24
+// Enter/exit bands to prevent flip-flopping at thresholds
+const SIZE_ENTER = 0.16
+const SIZE_EXIT = 0.12
+const SIZE_MAX_ENTER = 0.95
+const SIZE_MAX_EXIT = 1.05
+const OVERLAP_ENTER = 0.75
+const OVERLAP_EXIT = 0.55
 
 const STABILIZER_FRAMES = 3
 
 const STATUS_MESSAGES: Record<FaceValidationStatus, string> = {
   no_face: "We can't see your face clearly",
-  too_far: 'Move closer so your face fills the frame',
+  too_far: 'Move a little closer',
   too_close: 'Move back a little',
   off_center: 'Center your face in the frame',
   valid: 'Looks good',
@@ -205,7 +201,6 @@ function classifyFaceMetrics(
   const overlap = intersectionArea(faceRect, guideRect)
   const overlapRatio = overlap / faceArea
   const faceToGuideRatio = faceArea / guideArea
-  const guideFill = overlap / guideArea
   const centerInGuide = isCenterInGuide(faceRect, guideRect)
 
   const wasValid = previousStatus === 'valid'
@@ -213,7 +208,6 @@ function classifyFaceMetrics(
   const minSize = wasValid ? SIZE_EXIT : SIZE_ENTER
   const maxSize = wasValid ? SIZE_MAX_EXIT : SIZE_MAX_ENTER
   const minOverlap = wasValid ? OVERLAP_EXIT : OVERLAP_ENTER
-  const minGuideFill = wasValid ? GUIDE_FILL_EXIT : GUIDE_FILL_ENTER
 
   if (faceToGuideRatio < minSize) {
     return 'too_far'
@@ -223,7 +217,7 @@ function classifyFaceMetrics(
     return 'too_close'
   }
 
-  if (!centerInGuide || overlapRatio < minOverlap || guideFill < minGuideFill) {
+  if (!centerInGuide || overlapRatio < minOverlap) {
     return 'off_center'
   }
 
