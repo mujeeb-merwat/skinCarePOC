@@ -21,15 +21,17 @@ export type FaceValidationResult = {
 
 const MIN_SCORE = 0.5
 const GUIDE_INSET = 0.78
-const GUIDE_CENTER_PAD = 0.08
+const GUIDE_INNER_PAD = 0.05
 
-// Enter/exit bands to prevent flip-flopping at thresholds
-const SIZE_ENTER = 0.16
-const SIZE_EXIT = 0.12
-const SIZE_MAX_ENTER = 0.95
-const SIZE_MAX_EXIT = 1.05
-const OVERLAP_ENTER = 0.75
-const OVERLAP_EXIT = 0.55
+// Expand tight BlazeFace boxes so forehead/chin count toward the frame
+const FACE_EXPAND_WIDTH = 0.12
+const FACE_EXPAND_HEIGHT = 0.25
+
+// Enter/exit bands to prevent flip-flopping at size thresholds
+const SIZE_ENTER = 0.3
+const SIZE_EXIT = 0.26
+const SIZE_MAX_ENTER = 0.92
+const SIZE_MAX_EXIT = 0.96
 
 const STABILIZER_FRAMES = 3
 
@@ -37,7 +39,7 @@ const STATUS_MESSAGES: Record<FaceValidationStatus, string> = {
   no_face: "We can't see your face clearly",
   too_far: 'Move a little closer',
   too_close: 'Move back a little',
-  off_center: 'Center your face in the frame',
+  off_center: 'Put your face in the frame',
   valid: 'Looks good',
 }
 
@@ -152,35 +154,50 @@ export function getGuideRect(displayW: number, displayH: number): Rect {
   }
 }
 
-function intersectionArea(a: Rect, b: Rect): number {
-  const x1 = Math.max(a.x, b.x)
-  const y1 = Math.max(a.y, b.y)
-  const x2 = Math.min(a.x + a.w, b.x + b.w)
-  const y2 = Math.min(a.y + a.h, b.y + b.h)
-  if (x2 <= x1 || y2 <= y1) return 0
-  return (x2 - x1) * (y2 - y1)
-}
-
-function getPaddedGuideRect(guideRect: Rect): Rect {
-  const padX = guideRect.w * GUIDE_CENTER_PAD
-  const padY = guideRect.h * GUIDE_CENTER_PAD
+function getInnerGuideRect(guideRect: Rect): Rect {
+  const pad = guideRect.w * GUIDE_INNER_PAD
   return {
-    x: guideRect.x + padX,
-    y: guideRect.y + padY,
-    w: guideRect.w - padX * 2,
-    h: guideRect.h - padY * 2,
+    x: guideRect.x + pad,
+    y: guideRect.y + pad,
+    w: guideRect.w - pad * 2,
+    h: guideRect.h - pad * 2,
   }
 }
 
-function isCenterInGuide(faceRect: Rect, guideRect: Rect): boolean {
-  const padded = getPaddedGuideRect(guideRect)
-  const faceCenterX = faceRect.x + faceRect.w / 2
-  const faceCenterY = faceRect.y + faceRect.h / 2
+function expandFaceRect(faceRect: Rect, displayW: number, displayH: number): Rect {
+  const extraW = faceRect.w * FACE_EXPAND_WIDTH
+  const extraH = faceRect.h * FACE_EXPAND_HEIGHT
+
+  let x = faceRect.x - extraW / 2
+  let y = faceRect.y - extraH / 2
+  let w = faceRect.w + extraW
+  let h = faceRect.h + extraH
+
+  if (x < 0) {
+    w += x
+    x = 0
+  }
+  if (y < 0) {
+    h += y
+    y = 0
+  }
+  if (x + w > displayW) {
+    w = displayW - x
+  }
+  if (y + h > displayH) {
+    h = displayH - y
+  }
+
+  return { x, y, w: Math.max(0, w), h: Math.max(0, h) }
+}
+
+function isFullyContained(faceRect: Rect, guideRect: Rect): boolean {
+  const inner = getInnerGuideRect(guideRect)
   return (
-    faceCenterX >= padded.x &&
-    faceCenterX <= padded.x + padded.w &&
-    faceCenterY >= padded.y &&
-    faceCenterY <= padded.y + padded.h
+    faceRect.x >= inner.x &&
+    faceRect.y >= inner.y &&
+    faceRect.x + faceRect.w <= inner.x + inner.w &&
+    faceRect.y + faceRect.h <= inner.y + inner.h
   )
 }
 
@@ -194,20 +211,18 @@ function resultForStatus(status: FaceValidationStatus): FaceValidationResult {
 function classifyFaceMetrics(
   faceRect: Rect,
   guideRect: Rect,
+  displayW: number,
+  displayH: number,
   previousStatus: FaceValidationStatus | null,
 ): FaceValidationStatus {
-  const faceArea = faceRect.w * faceRect.h
+  const expanded = expandFaceRect(faceRect, displayW, displayH)
+  const faceArea = expanded.w * expanded.h
   const guideArea = guideRect.w * guideRect.h
-  const overlap = intersectionArea(faceRect, guideRect)
-  const overlapRatio = overlap / faceArea
   const faceToGuideRatio = faceArea / guideArea
-  const centerInGuide = isCenterInGuide(faceRect, guideRect)
 
   const wasValid = previousStatus === 'valid'
-
   const minSize = wasValid ? SIZE_EXIT : SIZE_ENTER
   const maxSize = wasValid ? SIZE_MAX_EXIT : SIZE_MAX_ENTER
-  const minOverlap = wasValid ? OVERLAP_EXIT : OVERLAP_ENTER
 
   if (faceToGuideRatio < minSize) {
     return 'too_far'
@@ -217,7 +232,7 @@ function classifyFaceMetrics(
     return 'too_close'
   }
 
-  if (!centerInGuide || overlapRatio < minOverlap) {
+  if (!isFullyContained(expanded, guideRect)) {
     return 'off_center'
   }
 
@@ -227,13 +242,21 @@ function classifyFaceMetrics(
 export function validateFaceInGuide(
   faceRect: Rect | null,
   guideRect: Rect,
+  displayW: number,
+  displayH: number,
   previousStatus: FaceValidationStatus | null = null,
 ): FaceValidationResult {
   if (!faceRect) {
     return resultForStatus('no_face')
   }
 
-  const status = classifyFaceMetrics(faceRect, guideRect, previousStatus)
+  const status = classifyFaceMetrics(
+    faceRect,
+    guideRect,
+    displayW,
+    displayH,
+    previousStatus,
+  )
   return resultForStatus(status)
 }
 
@@ -258,7 +281,7 @@ export function validateDetections(
   )
 
   if (usable.length === 0) {
-    return validateFaceInGuide(null, guide, previousStatus)
+    return validateFaceInGuide(null, guide, displayW, displayH, previousStatus)
   }
 
   let best = usable[0]
@@ -273,7 +296,7 @@ export function validateDetections(
   }
 
   const faceRect = mapBboxToDisplay(best.boundingBox!, transform)
-  return validateFaceInGuide(faceRect, guide, previousStatus)
+  return validateFaceInGuide(faceRect, guide, displayW, displayH, previousStatus)
 }
 
 export function createValidationStabilizer(requiredFrames = STABILIZER_FRAMES) {
